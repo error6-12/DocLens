@@ -207,7 +207,11 @@ class TestImageContent:
         assert isinstance(mcp_content, types.ImageContent)
         assert mcp_content.type == "image"
         assert mcp_content.data == "iVBORw0KGgo="
-        assert mcp_content.mimeType == "image/png"
+        wire_content = mcp_content.model_dump(by_alias=True)
+        assert wire_content["mimeType"] == "image/png"
+        assert "mime_type" not in wire_content
+        decoded = types.ImageContent.model_validate(wire_content)
+        assert decoded.model_dump(by_alias=True)["mimeType"] == "image/png"
     
     def test_to_dict(self):
         """Test serialization to dictionary."""

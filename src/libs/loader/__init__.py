@@ -8,7 +8,6 @@ This package contains document loader components:
 """
 
 from src.libs.loader.base_loader import BaseLoader
-from src.libs.loader.pdf_loader import PdfLoader
 from src.libs.loader.file_integrity import FileIntegrityChecker, SQLiteIntegrityChecker
 
 __all__ = [
@@ -17,3 +16,11 @@ __all__ = [
     "FileIntegrityChecker",
     "SQLiteIntegrityChecker",
 ]
+
+
+def __getattr__(name):
+    # Metadata-only operations do not need PDF parsing dependencies.
+    if name == "PdfLoader":
+        from src.libs.loader.pdf_loader import PdfLoader
+        return PdfLoader
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

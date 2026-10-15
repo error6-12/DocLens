@@ -154,6 +154,14 @@ def _render_ingestion_diagnostics(
     upsert_d: Dict[str, Any],
 ) -> None:
     """Render diagnostic hints for ingestion pipeline stages."""
+    if not stages_by_name:
+        st.info(
+            "No stage details were recorded for this ingestion. "
+            "It may have been skipped or recorded by an earlier version; "
+            "the absence of stage data alone does not establish a failure."
+        )
+        return
+
     expected = ["load", "split", "transform", "embed", "upsert"]
     present = [s for s in expected if s in stages_by_name]
     missing = [s for s in expected if s not in stages_by_name]

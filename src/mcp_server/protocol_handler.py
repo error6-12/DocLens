@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from mcp import types
+from jsonschema import validate, ValidationError
 from mcp.server.lowlevel import Server
 
 from src.observability.logger import get_logger
@@ -134,6 +135,7 @@ class ProtocolHandler:
 
         tool = self.tools[name]
         try:
+            validate(instance=arguments, schema=tool.input_schema)
             self._logger.info("Executing tool: %s", name)
             result = await tool.handler(**arguments)
 
@@ -153,6 +155,11 @@ class ProtocolHandler:
                 isError=False,
             )
 
+        except ValidationError:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="Error: Invalid parameters for tool schema")],
+                isError=True,
+            )
         except TypeError as e:
             # Invalid parameters
             self._logger.error("Invalid params for tool %s: %s", name, e)
@@ -239,22 +246,29 @@ def create_mcp_server(
     if register_tools:
         _register_default_tools(protocol_handler)
 
-    # Create low-level server
-    server = Server(server_name)
+    if hasattr(Server, "list_tools"):
+        # SDK 1 registers decorators and wraps the returned list of tools.
+        server = Server(server_name, version=server_version)
 
-    # Register tools/list handler
-    @server.list_tools()
-    async def handle_list_tools() -> List[types.Tool]:
-        """Handle tools/list request."""
-        return protocol_handler.get_tool_schemas()
+        @server.list_tools()
+        async def handle_list_tools() -> List[types.Tool]:
+            return protocol_handler.get_tool_schemas()
 
-    # Register tools/call handler
-    @server.call_tool()
-    async def handle_call_tool(
-        name: str, arguments: Dict[str, Any]
-    ) -> types.CallToolResult:
-        """Handle tools/call request."""
-        return await protocol_handler.execute_tool(name, arguments)
+        @server.call_tool()
+        async def handle_call_tool(name: str, arguments: Dict[str, Any]):
+            return await protocol_handler.execute_tool(name, arguments)
+    else:
+        # SDK 2 takes typed handlers in the constructor and expects full results.
+        async def handle_list_tools(context, params):
+            return types.ListToolsResult(tools=protocol_handler.get_tool_schemas())
+
+        async def handle_call_tool(context, params):
+            return await protocol_handler.execute_tool(params.name, params.arguments or {})
+
+        server = Server(
+            server_name, version=server_version,
+            on_list_tools=handle_list_tools, on_call_tool=handle_call_tool,
+        )
 
     # Store protocol handler on server for access
     server._protocol_handler = protocol_handler  # type: ignore[attr-defined]

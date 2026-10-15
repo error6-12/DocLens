@@ -1,16 +1,17 @@
-"""Image storage with SQLite indexing for multimodal RAG.
+"""Image storage with relational indexing for multimodal RAG.
 
-This module provides persistent image storage with SQLite-backed indexing,
+This module provides persistent image storage with SQLAlchemy-backed indexing,
 enabling efficient image retrieval and management across collections.
 
 Design Principles:
-- Persistent: Images stored on filesystem, metadata in SQLite
-- Concurrent: WAL mode enables concurrent read/write operations
+- Persistent: Images stored on filesystem, metadata in MySQL
+- Concurrent: MySQL supports pooled connections and atomic metadata upserts
 - Idempotent: Re-saving same image_id updates metadata safely
 - Organized: Images grouped by collection for namespace isolation
 """
 
-import sqlite3
+from sqlalchemy import select
+from src.core.database import MetadataStore, image_index
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,10 +19,10 @@ from typing import Optional, List, Dict, Union
 
 
 class ImageStorage:
-    """SQLite-backed image storage manager.
+    """SQLAlchemy-backed image storage manager.
     
     Stores image files in organized directory structure and maintains
-    a SQLite index for efficient lookup and querying.
+    a relational index for efficient lookup and querying.
     
     Directory Structure:
         data/images/{collection}/{image_id}.png
@@ -40,7 +41,7 @@ class ImageStorage:
         INDEX idx_doc_hash ON image_index(doc_hash)
     
     Args:
-        db_path: Path to SQLite database file (default: data/db/image_index.db).
+        db_path: Explicit SQLite test path or URL; None uses MySQL configuration.
         images_root: Root directory for image storage (default: data/images).
     
     Example:
@@ -69,71 +70,32 @@ class ImageStorage:
     
     def __init__(
         self,
-        db_path: str = "data/db/image_index.db",
+        db_path: Optional[str] = None,
         images_root: str = "data/images"
     ):
         """Initialize image storage and create database if needed.
         
         Args:
-            db_path: Path to SQLite database file.
+            db_path: Optional SQLite test path or database URL.
             images_root: Root directory for storing image files.
         """
         self.db_path = db_path
         self.images_root = Path(images_root)
-        self._conn = None
+        self.store = None
         self._ensure_database()
     
     def close(self) -> None:
-        """Close database connection if open."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        if getattr(self, 'store', None) is not None:
+            self.store.close()
+            self.store = None
     
     def __del__(self):
         """Cleanup: close connection on deletion."""
         self.close()
     
     def _ensure_database(self) -> None:
-        """Create database file and schema if they don't exist."""
-        # Create parent directories
-        db_file = Path(self.db_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Create images root directory
         self.images_root.mkdir(parents=True, exist_ok=True)
-        
-        # Connect and initialize schema
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Enable WAL mode for concurrent access
-            conn.execute("PRAGMA journal_mode=WAL")
-            
-            # Create table if not exists
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS image_index (
-                    image_id TEXT PRIMARY KEY,
-                    file_path TEXT NOT NULL,
-                    collection TEXT,
-                    doc_hash TEXT,
-                    page_num INTEGER,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            
-            # Create indexes for efficient queries
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_collection 
-                ON image_index(collection)
-            """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_doc_hash 
-                ON image_index(doc_hash)
-            """)
-            
-            conn.commit()
-        finally:
-            conn.close()
+        self.store = MetadataStore(self.db_path, tables=[image_index])
     
     def save_image(
         self,
@@ -210,21 +172,10 @@ class ImageStorage:
         # Register in database
         now = datetime.now(timezone.utc).isoformat()
         
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Use INSERT OR REPLACE for idempotent operation
-            conn.execute("""
-                INSERT OR REPLACE INTO image_index 
-                (image_id, file_path, collection, doc_hash, page_num, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (image_id, stored_path, collection, doc_hash, page_num, now))
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to register image {image_id}: {e}")
-        finally:
-            conn.close()
-        
+        self.store.upsert(image_index, dict(
+            image_id=image_id, file_path=stored_path, collection=collection,
+            doc_hash=doc_hash, page_num=page_num, created_at=now))
+
         return stored_path
     
     def register_image(
@@ -281,48 +232,16 @@ class ImageStorage:
         # Register in database
         now = datetime.now(timezone.utc).isoformat()
         
-        conn = sqlite3.connect(self.db_path)
-        try:
-            # Use INSERT OR REPLACE for idempotent operation
-            conn.execute("""
-                INSERT OR REPLACE INTO image_index 
-                (image_id, file_path, collection, doc_hash, page_num, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (image_id, stored_path, collection, doc_hash, page_num, now))
-            
-            conn.commit()
-        except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to register image {image_id}: {e}")
-        finally:
-            conn.close()
-        
+        self.store.upsert(image_index, dict(
+            image_id=image_id, file_path=stored_path, collection=collection,
+            doc_hash=doc_hash, page_num=page_num, created_at=now))
+
         return stored_path
     
     def get_image_path(self, image_id: str) -> Optional[str]:
-        """Get filesystem path for an image by ID.
-        
-        Args:
-            image_id: Unique identifier for the image.
-            
-        Returns:
-            Relative file path if image exists, None otherwise.
-            
-        Example:
-            >>> path = storage.get_image_path("img1")
-            >>> if path:
-            ...     with open(path, "rb") as f:
-            ...         image_data = f.read()
-        """
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.execute(
-                "SELECT file_path FROM image_index WHERE image_id = ?",
-                (image_id,)
-            )
-            result = cursor.fetchone()
-            return result[0] if result else None
-        finally:
-            conn.close()
+        with self.store.engine.connect() as connection:
+            return connection.scalar(select(image_index.c.file_path).where(
+                image_index.c.image_id == image_id))
     
     def image_exists(self, image_id: str) -> bool:
         """Check if image exists in database.
@@ -335,107 +254,33 @@ class ImageStorage:
         """
         return self.get_image_path(image_id) is not None
     
-    def list_images(
-        self,
-        collection: Optional[str] = None,
-        doc_hash: Optional[str] = None
-    ) -> List[Dict[str, any]]:
-        """List images with optional filtering.
-        
-        Args:
-            collection: Optional collection filter.
-            doc_hash: Optional document hash filter.
-            
-        Returns:
-            List of image metadata dictionaries with keys:
-            - image_id: Image identifier
-            - file_path: Filesystem path
-            - collection: Collection name
-            - doc_hash: Document hash
-            - page_num: Page number (if applicable)
-            - created_at: Creation timestamp
-            
-        Example:
-            >>> # List all images in a collection
-            >>> images = storage.list_images(collection="contracts")
-            >>> for img in images:
-            ...     print(img["image_id"], img["file_path"])
-            
-            >>> # List images from a specific document
-            >>> images = storage.list_images(doc_hash="abc123")
-        """
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Enable dict-like access
-        
-        try:
-            # Build query with optional filters
-            query = "SELECT * FROM image_index WHERE 1=1"
-            params = []
-            
-            if collection is not None:
-                query += " AND collection = ?"
-                params.append(collection)
-            
-            if doc_hash is not None:
-                query += " AND doc_hash = ?"
-                params.append(doc_hash)
-            
-            query += " ORDER BY created_at ASC"
-            
-            cursor = conn.execute(query, params)
-            rows = cursor.fetchall()
-            
-            # Convert rows to dictionaries
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+    def list_images(self, collection=None, doc_hash=None):
+        query = select(image_index)
+        if collection is not None:
+            query = query.where(image_index.c.collection == collection)
+        if doc_hash is not None:
+            query = query.where(image_index.c.doc_hash == doc_hash)
+        with self.store.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                query.order_by(image_index.c.created_at.asc())).mappings()]
     
     def delete_image(self, image_id: str, remove_file: bool = True) -> bool:
-        """Delete image from database and optionally from filesystem.
-        
-        Args:
-            image_id: Unique identifier for the image.
-            remove_file: If True, also delete the image file (default: True).
-            
-        Returns:
-            True if image was deleted, False if not found.
-            
-        Example:
-            >>> # Delete image and file
-            >>> deleted = storage.delete_image("img1")
-            >>> 
-            >>> # Remove from database only, keep file
-            >>> deleted = storage.delete_image("img2", remove_file=False)
-        """
-        # Get file path before deleting from database
         file_path = self.get_image_path(image_id)
-        
         if file_path is None:
             return False
-        
-        # Delete from database
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.execute(
-                "DELETE FROM image_index WHERE image_id = ?",
-                (image_id,)
-            )
-            conn.commit()
-            deleted = cursor.rowcount > 0
-        except sqlite3.Error:
-            return False
-        finally:
-            conn.close()
-        
-        # Optionally delete file
+        with self.store.engine.begin() as connection:
+            deleted = connection.execute(image_index.delete().where(
+                image_index.c.image_id == image_id)).rowcount > 0
         if remove_file and deleted:
             try:
                 Path(file_path).unlink(missing_ok=True)
-            except Exception:
-                # Log but don't fail if file deletion fails
+            except OSError:
                 pass
-        
         return deleted
+
+    def clear(self):
+        with self.store.engine.begin() as connection:
+            connection.execute(image_index.delete())
     
     def get_collection_stats(self, collection: str) -> Dict[str, any]:
         """Get statistics for a collection.

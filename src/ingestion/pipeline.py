@@ -26,7 +26,7 @@ from src.core.trace.trace_context import TraceContext
 from src.observability.logger import get_logger
 
 # Libs layer imports
-from src.libs.loader.file_integrity import SQLiteIntegrityChecker
+from src.libs.loader.database_integrity import DatabaseIntegrityChecker
 from src.libs.loader.pdf_loader import PdfLoader
 from src.libs.embedding.embedding_factory import EmbeddingFactory
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
@@ -138,7 +138,7 @@ class IngestionPipeline:
         logger.info("Initializing Ingestion Pipeline components...")
         
         # Stage 1: File Integrity
-        self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("data/db/ingestion_history.db")))
+        self.integrity_checker = DatabaseIntegrityChecker()
         logger.info("  ✓ FileIntegrityChecker initialized")
         
         # Stage 2: Loader
@@ -187,7 +187,6 @@ class IngestionPipeline:
         logger.info("  ✓ BM25Indexer initialized")
         
         self.image_storage = ImageStorage(
-            db_path=str(resolve_path("data/db/image_index.db")),
             images_root=str(resolve_path("data/images"))
         )
         logger.info("  ✓ ImageStorage initialized")

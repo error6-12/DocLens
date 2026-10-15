@@ -52,7 +52,7 @@ class DataService:
         from src.ingestion.document_manager import DocumentManager
         from src.ingestion.storage.bm25_indexer import BM25Indexer
         from src.ingestion.storage.image_storage import ImageStorage
-        from src.libs.loader.file_integrity import SQLiteIntegrityChecker
+        from src.libs.loader.database_integrity import DatabaseIntegrityChecker
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
         settings = load_settings()
@@ -62,12 +62,9 @@ class DataService:
         )
         bm25 = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{target_collection}")))
         images = ImageStorage(
-            db_path=str(resolve_path("data/db/image_index.db")),
             images_root=str(resolve_path("data/images")),
         )
-        integrity = SQLiteIntegrityChecker(
-            db_path=str(resolve_path("data/db/ingestion_history.db"))
-        )
+        integrity = DatabaseIntegrityChecker()
 
         self._chroma = chroma
         self._images = images
@@ -237,11 +234,14 @@ class DataService:
         except Exception as exc:
             summary["errors"].append(f"BM25: {exc}")
 
-        # 3. Clear image storage (SQLite DB + image files)
+        # 3. Clear image metadata and files
         try:
-            img_db = resolve_path("data/db/image_index.db")
-            if img_db.exists():
-                img_db.unlink()
+            from src.ingestion.storage.image_storage import ImageStorage
+            images = ImageStorage(images_root=str(resolve_path('data/images')))
+            try:
+                images.clear()
+            finally:
+                images.close()
             img_dir = resolve_path("data/images")
             if img_dir.exists():
                 shutil.rmtree(img_dir)
@@ -252,9 +252,12 @@ class DataService:
 
         # 4. Clear file integrity database
         try:
-            integrity_db = resolve_path("data/db/ingestion_history.db")
-            if integrity_db.exists():
-                integrity_db.unlink()
+            from src.libs.loader.database_integrity import DatabaseIntegrityChecker
+            integrity = DatabaseIntegrityChecker()
+            try:
+                integrity.clear()
+            finally:
+                integrity.close()
             summary["integrity_cleared"] = True
         except Exception as exc:
             summary["errors"].append(f"Integrity: {exc}")
@@ -269,6 +272,10 @@ class DataService:
             summary["errors"].append(f"Traces: {exc}")
 
         # Reset internal state so next call re-initializes
+        if self._images is not None:
+            self._images.close()
+        if self._manager is not None:
+            self._manager.integrity.close()
         self._manager = None
         self._chroma = None
         self._images = None

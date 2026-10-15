@@ -105,10 +105,13 @@ class ImageContent:
         Returns:
             MCP ImageContent object for protocol response.
         """
+        # SDK 1 uses camelCase attributes; SDK 2 uses snake_case attributes.
+        # Both versions serialize the protocol field as mimeType.
+        field_name = (
+            "mime_type" if "mime_type" in types.ImageContent.model_fields else "mimeType"
+        )
         return types.ImageContent(
-            type="image",
-            data=self.data,
-            mimeType=self.mime_type,
+            type="image", data=self.data, **{field_name: self.mime_type}
         )
     
     def to_dict(self) -> Dict[str, Any]:
